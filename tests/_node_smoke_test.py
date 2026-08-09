@@ -292,6 +292,64 @@ def main():
     assert abs(ref2[nodes.MC_AUDIO_KEY] - 22.0) < 1e-9
     print("vae path: unchanged, end_frame %.1f" % ref2[nodes.MC_AUDIO_KEY])
 
+    # FL2VA/stock keyframe compatibility: a first_frame/last_frame anchor
+    # already in the incoming conditioning must survive alongside our own
+    # pinned run, in both directions (no ref, and with an audio ref).
+    stock_keyframes = [
+        {"resolved_frame_index": 0, "latent": "stock-first"},
+        {"resolved_frame_index": frames - 1, "latent": "stock-last"},
+    ]
+    fl2va_conditioning = [["c", {"minimax_keyframes": stock_keyframes}]]
+
+    captured.clear()
+    node.apply(
+        conditioning=fl2va_conditioning, vae=VAE(), latent=target,
+        context_frames=context, context_length=22, encode_mode="video",
+        anchor_mode="head", crop="disabled")
+    kfs = captured["minimax_keyframes"]
+    assert len(kfs) == 2 + 7, len(kfs)
+    assert kfs[0] is stock_keyframes[0] and kfs[1] is stock_keyframes[1]
+    assert nodes.MC_KEY not in kfs[0] and nodes.MC_KEY not in kfs[1]
+    assert [kf[nodes.MC_KEY] for kf in kfs[2:]] == [0, 1, 5, 9, 13, 17, 18]
+    assert fl2va_conditioning[0][1]["minimax_keyframes"] == stock_keyframes  # no mutation
+    print("FL2VA keyframes: stock first/last anchors preserved untagged "
+          "ahead of 7 appended Motion Context blocks (no ref)")
+
+    # same, but with an audio-continuation ref: the stock anchors must pick
+    # up an explicit MC_KEY so _fixup applies the ref-cursor offset to them
+    captured.clear()
+    node.apply(
+        conditioning=fl2va_conditioning, vae=VAE(), latent=target,
+        context_frames=context, context_length=22, encode_mode="video",
+        anchor_mode="head", crop="disabled", audio_context_length=22,
+        audio_mode="timeline", context_latent=prev)
+    kfs = captured["minimax_keyframes"]
+    assert len(kfs) == 2 + 7, len(kfs)
+    assert kfs[0][nodes.MC_KEY] == 0 and kfs[0]["latent"] == "stock-first"
+    assert kfs[1][nodes.MC_KEY] == frames - 1 and kfs[1]["latent"] == "stock-last"
+    assert [kf[nodes.MC_KEY] for kf in kfs[2:]] == [0, 1, 5, 9, 13, 17, 18]
+    assert fl2va_conditioning[0][1]["minimax_keyframes"] == stock_keyframes  # still no mutation
+    assert captured["minimax_refs"][-1]["kind"] == "audio"
+    print("FL2VA keyframes: stock anchors tagged with MC_KEY when combined "
+          "with an audio-continuation ref, audio ref still appended")
+
+    # a keyframe with neither MC_KEY nor a first/last resolved_frame_index
+    # must be refused rather than silently mispositioned once refs shift
+    # the timeline
+    bad_conditioning = [["c", {"minimax_keyframes": [
+        {"resolved_frame_index": 5, "latent": "bad"}]}]]
+    try:
+        node.apply(
+            conditioning=bad_conditioning, vae=VAE(), latent=target,
+            context_frames=context, context_length=22, encode_mode="video",
+            anchor_mode="head", crop="disabled", context_latent=prev)
+    except RuntimeError as e:
+        assert "cannot safely combine" in str(e)
+    else:
+        raise AssertionError("unresolvable stock keyframe + ref was not refused")
+    print("FL2VA keyframes: an untaggable stock anchor combined with a ref "
+          "is refused rather than silently mispositioned")
+
     # save -> load -> context_latent roundtrip across "runs"
     import time
     saver = nodes.MiniMaxH3MotionContextSaveLatent()

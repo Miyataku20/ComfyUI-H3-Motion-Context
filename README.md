@@ -111,6 +111,19 @@ They are included here with attribution; this repo activates the shared
 compatibility behavior inline when Motion Context executes, so users do not
 have to run its external patching script and unrelated H3 workflows stay stock.
 
+Motion Context also preserves a stock `first_frame`/`last_frame` anchor from
+`MiniMaxH3ImageToVideo` (FL2VA) the same way: instead of replacing
+`minimax_keyframes`, it appends its own pinned run after whatever anchors are
+already there. This lets you pin the real, decoded final frame of a segment
+with `last_frame` while Motion Context pins continuity from the previous
+clip's tail - useful when you want every segment's end to land on a real
+frame instead of a purely generated one. If an audio-continuation ref
+(`context_latent`/`context_audio`) is wired at the same time, the stock
+anchor is also given the layout patch's positioning tag so its coordinate
+picks up the same shift the ref gives the rest of the timeline; without that,
+the anchor would keep its un-shifted stock position and drift out of sync
+with the rest of the clip.
+
 ## Automated disk-backed chains
 
 The `H3 Chain` nodes turn a repeated Ref2VA graph into one recursive sampling
