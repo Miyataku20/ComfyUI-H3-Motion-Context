@@ -251,6 +251,37 @@ def _audio_tail_from_latent(latent, a_frames):
     return tail, rt, float(overhang)
 
 
+def _tag_stock_keyframes_for_ref_offset(existing_keyframes, frame_count):
+    """Give every incoming stock keyframe an explicit MC_KEY so _fixup
+    applies the same ref-cursor offset to it as to our own pinned run.
+
+    A stock first_frame/last_frame anchor (from MiniMaxH3ImageToVideo) has
+    no MC_KEY; _fixup leaves untagged entries at their un-offset stock
+    position. That is correct with no refs, but once an audio-continuation
+    ref is also appended, the target's own origin shifts forward by the
+    refs' cursor advance (_ref_cursor_advance in patch_layout.py) -- an
+    un-offset stock anchor would then silently drift out of sync with the
+    shifted target. Tagging it with its own already-known position (0 or
+    frame_count - 1, the only two values stock accepts) makes _fixup apply
+    the identical offset-aware formula to it, matching where the target
+    itself now sits.
+    """
+    tagged = []
+    for kf in existing_keyframes:
+        if kf.get(MC_KEY) is not None:
+            tagged.append(kf)
+            continue
+        p = kf.get("resolved_frame_index")
+        if p not in (0, frame_count - 1):
+            raise RuntimeError(
+                "h3_motion_context: an incoming keyframe has "
+                "resolved_frame_index=%r (neither 0 nor frame_count-1) and "
+                "no %s tag; cannot safely combine it with an "
+                "audio-continuation ref." % (p, MC_KEY))
+        tagged.append({**kf, MC_KEY: p})
+    return tagged
+
+
 class MiniMaxH3MotionContext:
     @classmethod
     def INPUT_TYPES(cls):
@@ -520,11 +551,34 @@ class MiniMaxH3MotionContext:
                     "audio_latent": audio_latent,
                 }
 
-        values = {"minimax_keyframes": keyframes}
+        values = {}
         if not native_guides:
             values["minimax_frame_count"] = frame_count
 
         out = node_helpers.conditioning_set_values(conditioning, values)
+
+        # FL2VA keyframe compatibility: a stock first_frame/last_frame anchor
+        # from the upstream conditioning node must not be replaced by our own
+        # pinned run -- append instead of assigning minimax_keyframes in
+        # `values` above. When an audio-continuation ref is also being added,
+        # tag every incoming stock anchor with an explicit MC_KEY first (see
+        # _tag_stock_keyframes_for_ref_offset), so its position picks up the
+        # same ref-cursor offset ours does.
+        existing_keyframes = None
+        for t in conditioning:
+            kf = t[1].get("minimax_keyframes")
+            if kf:
+                existing_keyframes = kf
+                break
+        if existing_keyframes and motion_context_audio_ref is not None:
+            out = node_helpers.conditioning_set_values(out, {
+                "minimax_keyframes": _tag_stock_keyframes_for_ref_offset(
+                    existing_keyframes, frame_count),
+            })
+
+        out = node_helpers.conditioning_set_values(
+            out, {"minimax_keyframes": keyframes}, append=True)
+
         if motion_context_audio_ref is not None:
             # Ref2VA multi-reference coexistence design contributed by
             # seitanism in the Banodoco seamless-extension thread. Append so
